@@ -29,8 +29,8 @@ import Convertor as Convertor
 from Convertor import Preprocessor
 
 
-def train_log(loss, batch_ct, epoch):
-    wandb.log({"epoch": epoch, "loss": loss}, step=batch_ct)
+def train_log(loss, loss_test, batch_ct, epoch):
+    wandb.log({"epoch": epoch, "loss": loss, "loss_test": loss_test}, step=batch_ct)
 
 def build_dataset(filename, train_ratio, batch_size, device):
     # Build dataset
@@ -49,7 +49,7 @@ def check_mem():
     print('Memory usage of current process 0 [GB]: ', process.memory_info().rss/(1024 * 1024 * 1024))
     return
 
-def train_model(files_list_, device='cpu'):
+def train_model(files_list_, device='cpu', serialized_model = True):
 
     # access all HPs through wandb.config, so logging matches execution!
     config = wandb.config
@@ -75,8 +75,10 @@ def train_model(files_list_, device='cpu'):
 
     # Instantiate model
     loss_fn = score_model.ScoreMatchingLoss()
-    model = score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
-
+    if not serialized_model:
+      model = score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    else:
+      model = score_model.get_seq_model(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
     table = PrettyTable(['Module name', 'Parameters listed'])
     t_params = 0
     for name_ , para_ in model.named_parameters():
@@ -100,6 +102,7 @@ def train_model(files_list_, device='cpu'):
     
     eps_ = []
     batch_ct = 0
+    test_loss = 1.0
     for epoch in range(0, config.epochs ):
         sys.stdout.write('\r')
         sys.stdout.write('Progress: %d/%d'%((epoch+1), config.epochs)) # Local Progress Tracker
@@ -137,7 +140,7 @@ def train_model(files_list_, device='cpu'):
                 # Zero any gradients from previous steps
                 optimiser.zero_grad()
                 # Loss average for each batch
-                loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device, diffusion_on_mask=False)
+                loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device, diffusion_on_mask=False, serialized_model=serialized_model, cp_chunks=1)
                 # collect dL/dx for any parameters (x) which have requires_grad = True via: x.grad += dL/dx
                 loss.backward()
                 cumulative_epoch_loss+=loss.item()
@@ -145,7 +148,7 @@ def train_model(files_list_, device='cpu'):
                 optimiser.step()
                 # Report metrics every 5th batch
                 if ((batch_ct + 1) % 5) == 0:
-                    train_log(loss, batch_ct, epoch)
+                    train_log(loss, test_loss, batch_ct, epoch)
             
             # Testing on subset of file
             for i, (shower_data,incident_energies) in enumerate(shower_loader_test,0):
@@ -154,7 +157,7 @@ def train_model(files_list_, device='cpu'):
                     model.eval()
                     shower_data = shower_data.to(device)
                     incident_energies = incident_energies.to(device)
-                    test_loss = score_model.loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device)
+                    test_loss = score_model.loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value=0.0, device=device, serialized_model=serialized_model, cp_chunks=0)
 
         scheduler.step()
         
@@ -167,7 +170,7 @@ def train_model(files_list_, device='cpu'):
     return save_name
 
 
-def generate(files_list_, load_filename, device='cpu'):
+def generate(files_list_, load_filename, device='cpu', serialized_model=True):
 
     wd = wandb.config.work_dir
     output_file = 'sampling_'+datetime.now().strftime('%Y%m%d_%H%M')+'_output/'
@@ -188,9 +191,12 @@ def generate(files_list_, load_filename, device='cpu'):
     diffusion_coeff_fn = functools.partial(sde.sde)
 
     # Load saved model
-    model=score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    if not serialized_model:
+        model = score_model.Gen(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+    else:
+        model = score_model.get_seq_model(config.n_feat_dim, config.embed_dim, config.hidden_dim, config.num_encoder_blocks, config.num_attn_heads, config.dropout_gen, marginal_prob_std=marginal_prob_std_fn)
     if load_filename == '':
-        load_name = os.path.join(wd,'training_20240408_1350_output/ckpt_tmp_299.pth')
+        load_name = os.path.join(wd,'training_20240804_0403_output/ckpt_tmp_210.pth')
     else:
         load_name = os.path.join(wd,load_filename)
 
@@ -224,7 +230,7 @@ def generate(files_list_, load_filename, device='cpu'):
     # create list to store final samples
     sample_ = []
     # instantiate sampler 
-    sampler = samplers.pc_sampler(sde=sde, padding_value=0.0, snr=0.16, sampler_steps=config.sampler_steps, steps2plot=plotsteps, device=device, jupyternotebook=False)
+    sampler = samplers.pc_sampler(sde=sde, padding_value=0.0, snr=0.16, sampler_steps=config.sampler_steps, steps2plot=plotsteps, device=device, jupyternotebook=False, serialized_model = serialized_model)
 
     # Collect Geant4 shower information
     for file_idx in range(len(files_list_)):
@@ -377,9 +383,9 @@ def generate(files_list_, load_filename, device='cpu'):
 
     gen_data = utils.cloud_dataset(sample_savename,device=device)
     # Generated distributions
-    dists_gen = display.plot_distribution(gen_data, nshowers_2_plot=config.n_showers_2_gen, padding_value=0.0)
+    dists_gen = display.plot_distribution(gen_data, nshowers_2_plot=config.n_showers_2_gen, padding_value=0.0, masking = True)
     # Distributions object for Geant4 files
-    dists = display.plot_distribution(files_list_, nshowers_2_plot=config.n_showers_2_gen, padding_value=0.0)
+    dists = display.plot_distribution(files_list_, nshowers_2_plot=config.n_showers_2_gen, padding_value=0.0, masking = True)
     comparison_fig = display.comparison_summary(dists, dists_gen, output_directory)#, erange=(-5,3), xrange=(-2.5,2.5), yrange=(-2.5,2.5), zrange=(0,1))
     # Add evaluation plots to keep on wandb
     wandb.log({"summary" : wandb.Image(comparison_fig)})
@@ -410,7 +416,7 @@ def main(config=None):
         print('Current device: ', torch.cuda.current_device())
         print('Cuda arch list: ', torch.cuda.get_arch_list())
     
-    print('Working directory: ' , config.work_dir)
+    print('Working directory: ' , args.work_dir)
 
     # Useful when debugging gradient issues
     torch.autograd.set_detect_anomaly(True)
@@ -426,7 +432,7 @@ def main(config=None):
             files_list_.append(os.path.join(training_file_path,filename))
     print(f'Files: {files_list_}')
 
-    with wandb.init(config=config, dir=config.work_dir):
+    with wandb.init(config=config, dir=args.work_dir):
         # access all HPs through wandb.config, so logging matches execution!
         config = wandb.config
 
@@ -517,19 +523,19 @@ def main(config=None):
         #train_model_name = "/afs/cern.ch/work/j/jthomasw/private/NTU/fast_sim/tdsm_encoder/training_20230830_1430_output/ckpt_tmp_499.pth" #Default model name 
         #### Training ####
         if switches_>>1 & trigger:
-            trained_model_name = train_model(files_list_, device=device)
+            trained_model_name = train_model(files_list_, device=device, serialized_model = args.serialized_model)
         
         #### Sampling ####
         if switches_>>2 & trigger:
             # If a new training was run and you want to use it
             if switches_>>1 & trigger:
-                output_directory = generate(files_list_, load_filename=trained_model_name, device=device)
+                output_directory = generate(files_list_, load_filename=trained_model_name, device=device, serialized_model = args.serialized_model)
             # To use an older training file
             # n.b. you'll need to make sure the config hyperparams are the same as the model being used
             else:
 #                trained_model_name = 'training_20240408_1350_output/ckpt_tmp_299.pth'
-                trained_model_name = 'training_20240429_1211_output/ckpt_tmp_2.pth'
-                output_directory = generate(files_list_, load_filename=trained_model_name, device=device)
+                trained_model_name = 'training_20240803_1929_output/ckpt_tmp_249.pth'
+                output_directory = generate(files_list_, load_filename=trained_model_name, device=device, serialized_model = args.serialized_model)
             
 
         #### Evaluation plots ####
@@ -558,7 +564,7 @@ def main(config=None):
 
             print(f'Geant4 inputs')
             # Distributions object for Geant4 files
-            dists = display.plot_distribution(files_list_, nshowers_2_plot=config.n_showers_2_gen, padding_value=padding_value)
+            dists = display.plot_distribution(files_list_, nshowers_2_plot=config.n_showers_2_gen, padding_value=padding_value, masking = True)
 
             entries = dists[0]
             all_incident_e = dists[1]
@@ -685,6 +691,7 @@ if __name__=='__main__':
     argparser.add_argument('-c', '--config', dest='config', help='Configuration file for parameter monitoring (relative path)', default='', type=str)
     argparser.add_argument('-p', '--preprocessor', dest='preprocessor', help='pickle files of preprocessor', default='', type=str)
     argparser.add_argument('--condor', dest = 'condor', default = 0, type=int)
+    argparser.add_argument('--serialized_model', action = 'store_true')
     parsed, unknown = argparser.parse_known_args()
     for arg in unknown:
         if arg.startswith(("-", "--")):
