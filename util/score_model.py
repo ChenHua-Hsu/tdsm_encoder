@@ -208,28 +208,19 @@ class Transformer_Block(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
-        self.embed_t = nn.Sequential(GaussianFourierProjection(embed_dim=embed_dim), nn.Linear(embed_dim, embed_dim))
-        self.embed_e = nn.Sequential(GaussianFourierProjection(embed_dim=embed_dim), nn.Linear(embed_dim, embed_dim))
-        self.act_sig = lambda x: x * torch.sigmoid(x)
-        self.dense_t = nn.Linear(embed_dim, embed_dim)
-        self.dense_e = nn.Linear(embed_dim, embed_dim)
-        self.dense_t =  Dense(embed_dim, 1)
-        self.dense_e =  Dense(embed_dim, 1)
     def forward(self, input_):
         #residual = x.clone()
-        x = input_[0]
-        t = input_[1]
-        e = input_[2]
-        x_cls = input_[3]
-        src_key_padding_mask = input_[4]
-        original_t = input_[5]
+        x = (input_[0]).clone()
+        t = (input_[1]).clone()
+        e = (input_[2]).clone()
+        x_cls = (input_[3]).clone()
+        src_key_padding_mask = (input_[4]).clone()
+        original_t = (input_[5]).clone()
         # Mean-field attention
         # Multiheaded self-attention but replacing query with a single mean field approximator
         # attn (query, key, value, key mask)
-        embed_t_ = self.act_sig(self.embed_t(t))
-        embed_e_ = self.act_sig(self.embed_e(e))
-        x += self.dense_t(embed_t_).clone()
-        x += self.dense_e(embed_e_).clone()
+        x += t.clone()
+        x += e.clone()
         attn_out = self.attn(x_cls, x, x, key_padding_mask = src_key_padding_mask)[0]
 
         attn_res_out = x_cls + attn_out
@@ -251,16 +242,23 @@ class Embed_Block(nn.Module):
     def __init__(self, n_feat_dim, embed_dim, hidden_dim, **kwargs):
         super().__init__()
         self.embed = nn.Linear(n_feat_dim, embed_dim)
+        self.embed_e = nn.Sequential(GaussianFourierProjection(embed_dim=embed_dim), nn.Linear(embed_dim, embed_dim))
+        self.embed_t = nn.Sequential(GaussianFourierProjection(embed_dim=embed_dim), nn.Linear(embed_dim, embed_dim))
+        self.act_sig = lambda x: x * torch.sigmoid(x)
+        self.dense_t =  Dense(embed_dim, 1)
+        self.dense_e =  Dense(embed_dim, 1)
         self.cls_token = nn.Parameter(torch.ones(1,1,embed_dim), requires_grad=True)
     def forward(self, input_):
 
-        x = input_[0]
-        t = input_[1]
-        e = input_[2]
-        src_key_padding_mask = input_[3]
+        x = (input_[0]).clone()
+        t = (input_[1]).clone()
+        e = (input_[2]).clone()
+        src_key_padding_mask = (input_[3]).clone()
         embed_x_ = self.embed(x)
         x_cls_expand = self.cls_token.expand(x.size(0), 1, -1)
-        return [embed_x_, t, e, x_cls_expand, src_key_padding_mask, t]
+        embed_e_ = self.dense_e(self.act_sig(self.embed_e(e)))
+        embed_t_ = self.dense_t(self.act_sig(self.embed_t(t)))
+        return [embed_x_, embed_t_, embed_e_, x_cls_expand, src_key_padding_mask, t]
 
 class Output_Block(nn.Module):
     def __init__(self, n_feat_dim, embed_dim, marginal_prob_std):
@@ -268,12 +266,12 @@ class Output_Block(nn.Module):
         self.out = nn.Linear(embed_dim, n_feat_dim)
         self.marginal_prob_std = marginal_prob_std
     def forward(self, input_):
-        x = input_[0]
-        embed_t = input_[1]
-        e = input_[2]
-        x_cls = input_[3]
-        src_key_padding_mask = input_[4]
-        original_t = input_[5]
+        x = (input_[0]).clone()
+        embed_t = (input_[1]).clone()
+        e = (input_[2]).clone()
+        x_cls = (input_[3]).clone()
+        src_key_padding_mask = (input_[4]).clone()
+        original_t = (input_[5]).clone()
         mean_ , std_ = self.marginal_prob_std(x,original_t)
         output = self.out(x) / std_[:, None, None]
         return output
